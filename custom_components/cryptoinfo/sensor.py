@@ -4,10 +4,12 @@ Sensor component for Cryptoinfo
 Author: Johnny Visser
 """
 
+import asyncio
 import urllib.error
 from datetime import datetime, timedelta
 
 from homeassistant import config_entries
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.components.sensor.const import SensorDeviceClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
@@ -45,12 +47,88 @@ from .const.const import (
     CONF_CRYPTOCURRENCY_IDS,
     CONF_CURRENCY_NAME,
     CONF_ID,
-    CONF_MIN_TIME_BETWEEN_REQUESTS,
     CONF_MULTIPLIERS,
     CONF_UNIT_OF_MEASUREMENT,
     CONF_UPDATE_FREQUENCY,
+    DOMAIN,
     SENSOR_PREFIX,
 )
+
+# Maximum number of API requests per minute (CoinGecko free tier limit)
+MAX_REQUESTS_PER_MINUTE = 15
+
+
+class CryptoApiRateLimiter:
+    """Global rate limiter for CoinGecko API requests.
+
+    Ensures no more than MAX_REQUESTS_PER_MINUTE requests are made globally,
+    and staggers coordinator updates to avoid bursts.
+    """
+
+    _instance = None
+    _lock = asyncio.Lock()
+
+    def __init__(self):
+        self._request_timestamps: list[datetime] = []
+        self._queue: asyncio.Queue[asyncio.Event] = asyncio.Queue()
+        self._coordinators: list["CryptoDataCoordinator"] = []
+        self._processing = False
+
+    @classmethod
+    def get_instance(cls) -> "CryptoApiRateLimiter":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def register_coordinator(self, coordinator: "CryptoDataCoordinator") -> int:
+        """Register a coordinator and return its stagger index."""
+        self._coordinators.append(coordinator)
+        return len(self._coordinators) - 1
+
+    def unregister_coordinator(self, coordinator: "CryptoDataCoordinator") -> None:
+        """Unregister a coordinator."""
+        if coordinator in self._coordinators:
+            self._coordinators.remove(coordinator)
+
+    def _cleanup_old_timestamps(self):
+        """Remove timestamps older than 1 minute."""
+        cutoff = datetime.now() - timedelta(minutes=1)
+        self._request_timestamps = [
+            ts for ts in self._request_timestamps if ts > cutoff
+        ]
+
+    async def acquire(self):
+        """Wait until we can make a request within rate limits."""
+        async with self._lock:
+            self._cleanup_old_timestamps()
+
+            if len(self._request_timestamps) >= MAX_REQUESTS_PER_MINUTE:
+                # Calculate how long to wait
+                oldest = self._request_timestamps[0]
+                wait_seconds = (
+                    oldest + timedelta(minutes=1) - datetime.now()
+                ).total_seconds()
+                if wait_seconds > 0:
+                    _LOGGER.debug(
+                        "Rate limit reached, waiting %.1f seconds", wait_seconds
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    self._cleanup_old_timestamps()
+
+            self._request_timestamps.append(datetime.now())
+
+    def get_stagger_delay(self, coordinator: "CryptoDataCoordinator") -> float:
+        """Calculate stagger delay in seconds for a coordinator.
+
+        Distributes coordinators across the update interval so they don't
+        all fire at the same time. Each coordinator gets spaced by at least
+        5 seconds to avoid API bursts.
+        """
+        if coordinator not in self._coordinators:
+            return 0
+        index = self._coordinators.index(coordinator)
+        # Stagger by 5 seconds per coordinator
+        return index * 5.0
 
 
 async def async_setup_entry(
@@ -68,9 +146,9 @@ async def async_setup_entry(
     unit_of_measurement = (config.get(CONF_UNIT_OF_MEASUREMENT) or "").strip()
     multipliers = config.get(CONF_MULTIPLIERS).strip()
     update_frequency = timedelta(minutes=(float(config.get(CONF_UPDATE_FREQUENCY))))
-    min_time_between_requests = timedelta(
-        minutes=(float(config.get(CONF_MIN_TIME_BETWEEN_REQUESTS)))
-    )
+
+    # Get rate limiter instance
+    rate_limiter = CryptoApiRateLimiter.get_instance()
 
     # Create coordinator for centralized data fetching
     coordinator = CryptoDataCoordinator(
@@ -78,9 +156,23 @@ async def async_setup_entry(
         cryptocurrency_ids,
         currency_name,
         update_frequency,
-        min_time_between_requests,
         id_name,
+        rate_limiter,
     )
+
+    # Store coordinator reference on config entry for cleanup
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("coordinators", [])
+    hass.data[DOMAIN]["coordinators"].append(coordinator)
+
+    # Apply stagger delay before first refresh to avoid all coordinators
+    # fetching at the same instant
+    stagger_delay = rate_limiter.get_stagger_delay(coordinator)
+    if stagger_delay > 0:
+        _LOGGER.debug(
+            "Staggering coordinator %s by %.1f seconds", id_name, stagger_delay
+        )
+        await asyncio.sleep(stagger_delay)
 
     # Wait for coordinator to do first update
     await coordinator.async_config_entry_first_refresh()
@@ -94,9 +186,11 @@ async def async_setup_entry(
 
     if multipliers_length != crypto_list_length:
         _LOGGER.error(
-            f"Length mismatch: multipliers ({multipliers_length}) and cryptocurrency id's ({crypto_list_length}) must have the same length"
+            "Length mismatch: multipliers (%d) and cryptocurrency id's (%d) must have the same length",
+            multipliers_length,
+            crypto_list_length,
         )
-        return False
+        return
 
     for i, cryptocurrency_id in enumerate(crypto_list):
         try:
@@ -112,118 +206,48 @@ async def async_setup_entry(
             )
         except urllib.error.HTTPError as error:
             _LOGGER.error(error.reason)
-            return False
+            return
 
     async_add_entities(entities)
 
 
 class CryptoDataCoordinator(DataUpdateCoordinator):
-    _active_coordinators = set()  # Set to track active coordinator IDs
-    _instance_count = 0  # Class variable to track number of coordinators
-    _last_update_time = None
-    _last_updated_id = None
-
     def __init__(
         self,
         hass: HomeAssistant,
         cryptocurrency_ids: str,
         currency_name: str,
         update_frequency: timedelta,
-        min_time_between_requests: timedelta,
         id_name: str,
+        rate_limiter: CryptoApiRateLimiter,
     ):
         super().__init__(
             hass,
             _LOGGER,
-            name="Crypto Data",
+            name=f"Crypto Data {id_name}",
             update_interval=update_frequency,
         )
-        self.instance_id = (
-            CryptoDataCoordinator._instance_count
-        )  # Assign current count as instance ID
-        CryptoDataCoordinator._instance_count += 1  # Increment the counter
-        CryptoDataCoordinator._active_coordinators.add(self.instance_id)
         self.cryptocurrency_ids = cryptocurrency_ids
         self.currency_name = currency_name
         self.id_name = id_name
-        self.min_time_between_requests = min_time_between_requests
-        self.update_frequency = update_frequency
+        self.rate_limiter = rate_limiter
+        self._stagger_index = rate_limiter.register_coordinator(self)
 
-    async def async_will_remove_from_hass(self) -> None:
-        """Handle removal from Home Assistant."""
-        _LOGGER.debug(f"Removing coordinator {self.instance_id}")
-        CryptoDataCoordinator._active_coordinators.discard(self.instance_id)
-        # If this was the last updated ID, reset it
-        if CryptoDataCoordinator._last_updated_id == self.instance_id:
-            CryptoDataCoordinator._last_updated_id = None
-
-    async def _async_update_data(self):
-        """Fetch data from API endpoint with coordinated timing."""
-        current_time = datetime.now()
-
-        # If this is the first ever request, fetch data immediately
-        if CryptoDataCoordinator._last_update_time is None:
-            CryptoDataCoordinator._last_update_time = current_time
-            CryptoDataCoordinator._last_updated_id = self.instance_id
-
-            _LOGGER.debug(
-                f"First request, fetching data for sensor: {self.id_name} instance_id: {self.instance_id} cryptocurrency_ids: {self.cryptocurrency_ids}"
-            )
-
-            url = (
-                f"{API_ENDPOINT}coins/markets"
-                f"?ids={self.cryptocurrency_ids}"
-                f"&vs_currency={self.currency_name}"
-                f"&price_change_percentage=1h%2C24h%2C7d%2C14d%2C30d%2C1y"
-            )
-
-            try:
-                session = aiohttp_client.async_get_clientsession(self.hass)
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    return {coin["id"]: coin for coin in data}
-            except Exception as err:
-                _LOGGER.error(f"Error fetching data: {err}")
-                return None
-
-        time_since_last_request = current_time - CryptoDataCoordinator._last_update_time
-
-        if (
-            time_since_last_request + timedelta(seconds=1)
-            < self.min_time_between_requests
-        ):
-            _LOGGER.debug(
-                f"Not enough time has passed {self.instance_id} {self.min_time_between_requests} "
-                f"waiting for time between requests {time_since_last_request} frequency:{self.update_frequency}"
-            )
-            return self.data if self.data else None
-
-        # Find the next active coordinator ID
-        last_id = CryptoDataCoordinator._last_updated_id
         _LOGGER.debug(
-            f"Last id {last_id}, Active coordinators: {sorted(CryptoDataCoordinator._active_coordinators)}"
+            "Coordinator %s registered with stagger index %d",
+            id_name,
+            self._stagger_index,
         )
 
-        if last_id is None or last_id not in CryptoDataCoordinator._active_coordinators:
-            should_update = self.instance_id == min(
-                CryptoDataCoordinator._active_coordinators
-            )
-        else:
-            # Get sorted list of active coordinators
-            active_ids = sorted(CryptoDataCoordinator._active_coordinators)
-            current_index = active_ids.index(last_id)
-            next_index = (current_index + 1) % len(active_ids)
-            next_id = active_ids[next_index]
-            should_update = self.instance_id == next_id
-            _LOGGER.debug(f"next_id {next_id}")
-
-        if not should_update:
-            _LOGGER.debug(f"Coordinator {self.instance_id} waiting for turn")
-            return self.data if self.data else None
+    async def _async_update_data(self):
+        """Fetch data from API endpoint with rate limiting."""
+        # Acquire rate limiter slot (waits if rate limit would be exceeded)
+        await self.rate_limiter.acquire()
 
         _LOGGER.debug(
-            f"Fetch data from API endpoint, sensor: {self.id_name} instance_id: {self.instance_id} cryptocurrency_ids: {self.cryptocurrency_ids}"
+            "Fetch data from API endpoint, sensor: %s cryptocurrency_ids: %s",
+            self.id_name,
+            self.cryptocurrency_ids,
         )
 
         url = (
@@ -236,19 +260,39 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
         try:
             session = aiohttp_client.async_get_clientsession(self.hass)
             async with session.get(url) as response:
+                if response.status == 429:
+                    retry_after = int(
+                        response.headers.get("Retry-After", "60")
+                    )
+                    _LOGGER.warning(
+                        "CoinGecko rate limit hit (429), retrying after %d seconds",
+                        retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    # Retry once after waiting
+                    async with session.get(url) as retry_response:
+                        retry_response.raise_for_status()
+                        data = await retry_response.json()
+                        return {coin["id"]: coin for coin in data}
+
                 response.raise_for_status()
                 data = await response.json()
-
-                # Update the last update time and ID only after successful request
-                CryptoDataCoordinator._last_update_time = current_time
-                CryptoDataCoordinator._last_updated_id = self.instance_id
-
                 return {coin["id"]: coin for coin in data}
         except Exception as err:
-            _LOGGER.error(f"Error fetching data: {err}")
+            _LOGGER.error("Error fetching data: %s", err)
+            return self.data if self.data else None
+
+    def async_remove(self):
+        """Handle removal - unregister from rate limiter."""
+        self.rate_limiter.unregister_coordinator(self)
+        _LOGGER.debug("Coordinator %s unregistered from rate limiter", self.id_name)
 
 
-class CryptoinfoSensor(CoordinatorEntity):
+class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
+    _attr_icon = "mdi:bitcoin"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.MONETARY
+
     def __init__(
         self,
         coordinator: CryptoDataCoordinator,
@@ -261,9 +305,8 @@ class CryptoinfoSensor(CoordinatorEntity):
         super().__init__(coordinator)
         self.cryptocurrency_id = cryptocurrency_id
         self.currency_name = currency_name
-        self._unit_of_measurement = unit_of_measurement
+        self._attr_native_unit_of_measurement = unit_of_measurement
         self.multiplier = multiplier
-        self._attr_device_class = SensorDeviceClass.MONETARY
         self.entity_id = "sensor." + (
             (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
             .lower()
@@ -272,8 +315,6 @@ class CryptoinfoSensor(CoordinatorEntity):
             + "_"
             + currency_name
         )
-        self._icon = "mdi:bitcoin"
-        self._state_class = "measurement"
         self._attr_unique_id = (
             SENSOR_PREFIX
             + (id_name + " " if len(id_name) > 0 else "")
@@ -282,19 +323,7 @@ class CryptoinfoSensor(CoordinatorEntity):
         )
 
     @property
-    def icon(self):
-        return self._icon
-
-    @property
-    def state_class(self):
-        return self._state_class
-
-    @property
-    def unit_of_measurement(self):
-        return self._unit_of_measurement
-
-    @property
-    def state(self):
+    def native_value(self):
         """Return the state of the sensor."""
         if self.coordinator.data and self.cryptocurrency_id in self.coordinator.data:
             return float(
@@ -360,5 +389,5 @@ class CryptoinfoSensor(CoordinatorEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
-        await self.coordinator.async_will_remove_from_hass()  # type: ignore
+        self.coordinator.async_remove()
         await super().async_will_remove_from_hass()

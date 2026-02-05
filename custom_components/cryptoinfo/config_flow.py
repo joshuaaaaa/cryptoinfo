@@ -11,14 +11,11 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers import config_validation as cv
 
-from .helper.crypto_info_data import CryptoInfoData
-
 from .const.const import (
     _LOGGER,
     CONF_CRYPTOCURRENCY_IDS,
     CONF_CURRENCY_NAME,
     CONF_ID,
-    CONF_MIN_TIME_BETWEEN_REQUESTS,
     CONF_MULTIPLIERS,
     CONF_UNIT_OF_MEASUREMENT,
     CONF_UPDATE_FREQUENCY,
@@ -72,12 +69,6 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     entry.data, validation_result, count_context
                 )
 
-            # Update the shared data
-            if DOMAIN in self.hass.data:
-                self.hass.data[DOMAIN].min_time_between_requests = user_input[
-                    CONF_MIN_TIME_BETWEEN_REQUESTS
-                ]
-
             # Create new data combining old entry data with new user input
             new_data = {**entry.data, **user_input}
 
@@ -105,11 +96,6 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if count_context is None:
             count_context = {}
 
-        # Get value from shared data if available
-        default_min_time = 0.25
-        if DOMAIN in self.hass.data:
-            default_min_time = self.hass.data[DOMAIN].min_time_between_requests
-
         cryptoinfo_schema = vol.Schema(
             {
                 vol.Optional(
@@ -135,10 +121,6 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_UPDATE_FREQUENCY, default=entry_data[CONF_UPDATE_FREQUENCY]
                 ): cv.positive_float,
-                vol.Required(
-                    CONF_MIN_TIME_BETWEEN_REQUESTS,
-                    description={"suggested_value": default_min_time},
-                ): cv.positive_float,
             }
         )
 
@@ -153,15 +135,6 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle a flow initialized by the user."""
         errors = {}
 
-        # Get default value from shared data if available
-        default_min_time = 0.25
-        if DOMAIN not in self.hass.data:
-            # Initialize data if it doesn't exist
-            self.hass.data[DOMAIN] = CryptoInfoData(self.hass)
-            await self.hass.data[DOMAIN].async_initialize()
-
-        default_min_time = self.hass.data[DOMAIN].min_time_between_requests
-
         # Use user_input values as defaults if they exist, otherwise use the original defaults
         defaults = {
             CONF_ID: "Main btc stash",
@@ -170,7 +143,6 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_CURRENCY_NAME: "usd",
             CONF_UNIT_OF_MEASUREMENT: "$",
             CONF_UPDATE_FREQUENCY: 1,
-            CONF_MIN_TIME_BETWEEN_REQUESTS: default_min_time,
         }
 
         # Update defaults with user input if it exists
@@ -200,10 +172,6 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_UPDATE_FREQUENCY, default=defaults[CONF_UPDATE_FREQUENCY]
                 ): cv.positive_float,
-                vol.Required(
-                    CONF_MIN_TIME_BETWEEN_REQUESTS,
-                    default=defaults[CONF_MIN_TIME_BETWEEN_REQUESTS],
-                ): cv.positive_float,
             }
         )
 
@@ -227,18 +195,13 @@ class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(user_input[CONF_ID])
             self._abort_if_unique_id_configured()
 
-            # Update the shared min_time_between_requests
-            self.hass.data[DOMAIN].min_time_between_requests = user_input[
-                CONF_MIN_TIME_BETWEEN_REQUESTS
-            ]
-
             # Create the config entry
             return self.async_create_entry(
                 title=f"Cryptoinfo for {user_input[CONF_ID]}", data=user_input
             )
 
         except Exception as ex:
-            _LOGGER.error(f"Error creating entry: {ex}")
+            _LOGGER.error("Error creating entry: %s", ex)
             errors["base"] = f"Error creating entry: {ex}"
             return self.async_show_form(
                 step_id="user", data_schema=cryptoinfo_schema, errors=errors
