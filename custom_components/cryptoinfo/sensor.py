@@ -9,11 +9,7 @@ import urllib.error
 from datetime import datetime, timedelta
 
 from homeassistant import config_entries
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorStateClass,
-)
+from homeassistant.components.sensor.const import SensorDeviceClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.device_registry import DeviceEntryType
@@ -189,11 +185,9 @@ async def async_setup_entry(
 
     if multipliers_length != crypto_list_length:
         _LOGGER.error(
-            "Length mismatch: multipliers (%d) and cryptocurrency id's (%d) must have the same length",
-            multipliers_length,
-            crypto_list_length,
+            f"Length mismatch: multipliers ({multipliers_length}) and cryptocurrency id's ({crypto_list_length}) must have the same length"
         )
-        return
+        return False
 
     # Build device info so all sensors from this config entry are grouped
     device_info = DeviceInfo(
@@ -219,7 +213,7 @@ async def async_setup_entry(
             )
         except urllib.error.HTTPError as error:
             _LOGGER.error(error.reason)
-            return
+            return False
 
     async_add_entities(entities)
 
@@ -292,7 +286,7 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
                 data = await response.json()
                 return {coin["id"]: coin for coin in data}
         except Exception as err:
-            _LOGGER.error("Error fetching data: %s", err)
+            _LOGGER.error(f"Error fetching data: {err}")
             return self.data if self.data else None
 
     def async_remove(self):
@@ -301,13 +295,7 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Coordinator %s unregistered from rate limiter", self.id_name)
 
 
-class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:bitcoin"
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_suggested_display_precision = 2
-
+class CryptoinfoSensor(CoordinatorEntity):
     def __init__(
         self,
         coordinator: CryptoDataCoordinator,
@@ -321,17 +309,20 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self.cryptocurrency_id = cryptocurrency_id
         self.currency_name = currency_name
+        self._unit_of_measurement = unit_of_measurement
         self.multiplier = multiplier
+        self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_device_info = device_info
-
-        # Entity name (combined with device name by HA automatically)
-        self._attr_name = f"{cryptocurrency_id} {currency_name}"
-
-        # For SensorDeviceClass.MONETARY, HA requires ISO 4217 currency code
-        # as native_unit_of_measurement for statistics/history to work.
-        # Use currency_name (e.g. "usd" -> "USD") as the unit.
-        self._attr_native_unit_of_measurement = currency_name.upper()
-
+        self.entity_id = "sensor." + (
+            (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
+            .lower()
+            .replace(" ", "_")
+            + cryptocurrency_id
+            + "_"
+            + currency_name
+        )
+        self._icon = "mdi:bitcoin"
+        self._state_class = "measurement"
         self._attr_unique_id = (
             SENSOR_PREFIX
             + (id_name + " " if len(id_name) > 0 else "")
@@ -340,7 +331,19 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
         )
 
     @property
-    def native_value(self):
+    def icon(self):
+        return self._icon
+
+    @property
+    def state_class(self):
+        return self._state_class
+
+    @property
+    def unit_of_measurement(self):
+        return self._unit_of_measurement
+
+    @property
+    def state(self):
         """Return the state of the sensor."""
         if self.coordinator.data and self.cryptocurrency_id in self.coordinator.data:
             return float(
