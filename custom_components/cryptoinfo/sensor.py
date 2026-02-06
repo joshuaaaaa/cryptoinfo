@@ -20,6 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
+    UpdateFailed,
 )
 
 from .const.const import (
@@ -278,8 +279,7 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
                 data = await response.json()
                 return {coin["id"]: coin for coin in data}
         except Exception as err:
-            _LOGGER.error(f"Error fetching data: {err}")
-            return self.data if self.data else None
+            raise UpdateFailed(f"Error fetching data: {err}") from err
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
@@ -305,7 +305,7 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
         self.cryptocurrency_id = cryptocurrency_id
         self.currency_name = currency_name
         self.multiplier = multiplier
-        self._attr_native_unit_of_measurement = unit_of_measurement
+        self._attr_native_unit_of_measurement = unit_of_measurement or None
         self._attr_unique_id = (
             SENSOR_PREFIX
             + (id_name + " " if len(id_name) > 0 else "")
