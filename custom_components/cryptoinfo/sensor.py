@@ -189,7 +189,10 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
                     data = await response.json()
                     return {coin["id"]: coin for coin in data}
             except Exception as err:
-                raise UpdateFailed(f"Error fetching data: {err}") from err
+                _LOGGER.error(f"Error fetching data: {err}")
+                if self.data is not None:
+                    raise UpdateFailed(f"Error fetching data: {err}") from err
+                return None
 
         time_since_last_request = current_time - CryptoDataCoordinator._last_update_time
 
@@ -249,7 +252,10 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
 
                 return {coin["id"]: coin for coin in data}
         except Exception as err:
-            raise UpdateFailed(f"Error fetching data: {err}") from err
+            _LOGGER.error(f"Error fetching data: {err}")
+            if self.data is not None:
+                raise UpdateFailed(f"Error fetching data: {err}") from err
+            return None
 
 
 class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
