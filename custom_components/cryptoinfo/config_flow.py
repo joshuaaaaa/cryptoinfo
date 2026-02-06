@@ -24,7 +24,7 @@ from .const.const import (
 
 
 class CryptoInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    VERSION = 2
 
     def _validate_input(self, user_input: dict[str, Any]) -> dict[str, Any]:
         """Validate the input."""
