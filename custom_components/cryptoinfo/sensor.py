@@ -9,8 +9,11 @@ import urllib.error
 from datetime import datetime, timedelta
 
 from homeassistant import config_entries
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
-from homeassistant.components.sensor.const import SensorDeviceClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.device_registry import DeviceEntryType
@@ -299,6 +302,7 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
 
 
 class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
     _attr_icon = "mdi:bitcoin"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.MONETARY
@@ -320,20 +324,14 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
         self.multiplier = multiplier
         self._attr_device_info = device_info
 
+        # Entity name (combined with device name by HA automatically)
+        self._attr_name = f"{cryptocurrency_id} {currency_name}"
+
         # For SensorDeviceClass.MONETARY, HA requires ISO 4217 currency code
         # as native_unit_of_measurement for statistics/history to work.
         # Use currency_name (e.g. "usd" -> "USD") as the unit.
-        # Fall back to user-provided symbol only if currency_name is empty.
         self._attr_native_unit_of_measurement = currency_name.upper()
 
-        self.entity_id = "sensor." + (
-            (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
-            .lower()
-            .replace(" ", "_")
-            + cryptocurrency_id
-            + "_"
-            + currency_name
-        )
         self._attr_unique_id = (
             SENSOR_PREFIX
             + (id_name + " " if len(id_name) > 0 else "")
