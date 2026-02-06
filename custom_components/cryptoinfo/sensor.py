@@ -302,10 +302,8 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
 
 
 class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
     _attr_icon = "mdi:bitcoin"
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_device_class = SensorDeviceClass.MONETARY
     _attr_suggested_display_precision = 2
 
     def __init__(
@@ -323,15 +321,23 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
         self.currency_name = currency_name
         self.multiplier = multiplier
         self._attr_device_info = device_info
+        self._attr_device_class = SensorDeviceClass.MONETARY
 
-        # Entity name (combined with device name by HA automatically)
-        self._attr_name = f"{cryptocurrency_id} {currency_name}"
+        # Use the user's unit_of_measurement symbol (e.g. "$") exactly as
+        # in the original working code. This preserves history/statistics
+        # continuity - changing the unit would invalidate existing statistics.
+        self._attr_native_unit_of_measurement = unit_of_measurement
 
-        # For SensorDeviceClass.MONETARY, HA requires ISO 4217 currency code
-        # as native_unit_of_measurement for statistics/history to work.
-        # Use currency_name (e.g. "usd" -> "USD") as the unit.
-        self._attr_native_unit_of_measurement = currency_name.upper()
-
+        # Preserve the original entity_id format so HA entity registry
+        # can match existing entities and their recorded history.
+        self.entity_id = "sensor." + (
+            (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
+            .lower()
+            .replace(" ", "_")
+            + cryptocurrency_id
+            + "_"
+            + currency_name
+        )
         self._attr_unique_id = (
             SENSOR_PREFIX
             + (id_name + " " if len(id_name) > 0 else "")
