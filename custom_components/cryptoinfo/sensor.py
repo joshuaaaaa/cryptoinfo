@@ -9,7 +9,11 @@ import urllib.error
 from datetime import datetime, timedelta
 
 from homeassistant import config_entries
-from homeassistant.components.sensor.const import SensorDeviceClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -283,7 +287,11 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Coordinator %s unregistered from rate limiter", self.id_name)
 
 
-class CryptoinfoSensor(CoordinatorEntity):
+class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:bitcoin"
+
     def __init__(
         self,
         coordinator: CryptoDataCoordinator,
@@ -296,9 +304,14 @@ class CryptoinfoSensor(CoordinatorEntity):
         super().__init__(coordinator)
         self.cryptocurrency_id = cryptocurrency_id
         self.currency_name = currency_name
-        self._unit_of_measurement = unit_of_measurement
         self.multiplier = multiplier
-        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_native_unit_of_measurement = unit_of_measurement
+        self._attr_unique_id = (
+            SENSOR_PREFIX
+            + (id_name + " " if len(id_name) > 0 else "")
+            + cryptocurrency_id
+            + currency_name
+        )
         self.entity_id = "sensor." + (
             (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
             .lower()
@@ -307,29 +320,9 @@ class CryptoinfoSensor(CoordinatorEntity):
             + "_"
             + currency_name
         )
-        self._icon = "mdi:bitcoin"
-        self._state_class = "measurement"
-        self._attr_unique_id = (
-            SENSOR_PREFIX
-            + (id_name + " " if len(id_name) > 0 else "")
-            + cryptocurrency_id
-            + currency_name
-        )
 
     @property
-    def icon(self):
-        return self._icon
-
-    @property
-    def state_class(self):
-        return self._state_class
-
-    @property
-    def unit_of_measurement(self):
-        return self._unit_of_measurement
-
-    @property
-    def state(self):
+    def native_value(self):
         """Return the state of the sensor."""
         if self.coordinator.data and self.cryptocurrency_id in self.coordinator.data:
             return float(
