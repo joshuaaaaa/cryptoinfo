@@ -13,6 +13,8 @@ from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.components.sensor.const import SensorDeviceClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -70,9 +72,7 @@ class CryptoApiRateLimiter:
 
     def __init__(self):
         self._request_timestamps: list[datetime] = []
-        self._queue: asyncio.Queue[asyncio.Event] = asyncio.Queue()
         self._coordinators: list["CryptoDataCoordinator"] = []
-        self._processing = False
 
     @classmethod
     def get_instance(cls) -> "CryptoApiRateLimiter":
@@ -160,7 +160,7 @@ async def async_setup_entry(
         rate_limiter,
     )
 
-    # Store coordinator reference on config entry for cleanup
+    # Store coordinator reference for cleanup
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault("coordinators", [])
     hass.data[DOMAIN]["coordinators"].append(coordinator)
@@ -192,6 +192,15 @@ async def async_setup_entry(
         )
         return
 
+    # Build device info so all sensors from this config entry are grouped
+    device_info = DeviceInfo(
+        identifiers={(DOMAIN, config_entry.entry_id)},
+        name=f"Cryptoinfo {id_name}" if id_name else "Cryptoinfo",
+        manufacturer="CoinGecko",
+        model="Crypto Tracker",
+        entry_type=DeviceEntryType.SERVICE,
+    )
+
     for i, cryptocurrency_id in enumerate(crypto_list):
         try:
             entities.append(
@@ -202,6 +211,7 @@ async def async_setup_entry(
                     unit_of_measurement,
                     multipliers_list[i],
                     id_name,
+                    device_info,
                 )
             )
         except urllib.error.HTTPError as error:
@@ -292,6 +302,7 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
     _attr_icon = "mdi:bitcoin"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_suggested_display_precision = 2
 
     def __init__(
         self,
@@ -301,12 +312,20 @@ class CryptoinfoSensor(CoordinatorEntity, SensorEntity):
         unit_of_measurement: str,
         multiplier: str,
         id_name: str,
+        device_info: DeviceInfo,
     ):
         super().__init__(coordinator)
         self.cryptocurrency_id = cryptocurrency_id
         self.currency_name = currency_name
-        self._attr_native_unit_of_measurement = unit_of_measurement
         self.multiplier = multiplier
+        self._attr_device_info = device_info
+
+        # For SensorDeviceClass.MONETARY, HA requires ISO 4217 currency code
+        # as native_unit_of_measurement for statistics/history to work.
+        # Use currency_name (e.g. "usd" -> "USD") as the unit.
+        # Fall back to user-provided symbol only if currency_name is empty.
+        self._attr_native_unit_of_measurement = currency_name.upper()
+
         self.entity_id = "sensor." + (
             (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
             .lower()
