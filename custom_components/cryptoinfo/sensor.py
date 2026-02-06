@@ -12,8 +12,6 @@ from homeassistant import config_entries
 from homeassistant.components.sensor.const import SensorDeviceClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
-from homeassistant.helpers.device_registry import DeviceEntryType
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -189,15 +187,6 @@ async def async_setup_entry(
         )
         return False
 
-    # Build device info so all sensors from this config entry are grouped
-    device_info = DeviceInfo(
-        identifiers={(DOMAIN, config_entry.entry_id)},
-        name=f"Cryptoinfo {id_name}" if id_name else "Cryptoinfo",
-        manufacturer="CoinGecko",
-        model="Crypto Tracker",
-        entry_type=DeviceEntryType.SERVICE,
-    )
-
     for i, cryptocurrency_id in enumerate(crypto_list):
         try:
             entities.append(
@@ -208,7 +197,6 @@ async def async_setup_entry(
                     unit_of_measurement,
                     multipliers_list[i],
                     id_name,
-                    device_info,
                 )
             )
         except urllib.error.HTTPError as error:
@@ -289,8 +277,8 @@ class CryptoDataCoordinator(DataUpdateCoordinator):
             _LOGGER.error(f"Error fetching data: {err}")
             return self.data if self.data else None
 
-    def async_remove(self):
-        """Handle removal - unregister from rate limiter."""
+    async def async_will_remove_from_hass(self) -> None:
+        """Handle removal from Home Assistant."""
         self.rate_limiter.unregister_coordinator(self)
         _LOGGER.debug("Coordinator %s unregistered from rate limiter", self.id_name)
 
@@ -304,7 +292,6 @@ class CryptoinfoSensor(CoordinatorEntity):
         unit_of_measurement: str,
         multiplier: str,
         id_name: str,
-        device_info: DeviceInfo,
     ):
         super().__init__(coordinator)
         self.cryptocurrency_id = cryptocurrency_id
@@ -312,7 +299,6 @@ class CryptoinfoSensor(CoordinatorEntity):
         self._unit_of_measurement = unit_of_measurement
         self.multiplier = multiplier
         self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_device_info = device_info
         self.entity_id = "sensor." + (
             (SENSOR_PREFIX + (id_name + " " if len(id_name) > 0 else ""))
             .lower()
@@ -409,5 +395,5 @@ class CryptoinfoSensor(CoordinatorEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
-        self.coordinator.async_remove()
+        await self.coordinator.async_will_remove_from_hass()  # type: ignore
         await super().async_will_remove_from_hass()
